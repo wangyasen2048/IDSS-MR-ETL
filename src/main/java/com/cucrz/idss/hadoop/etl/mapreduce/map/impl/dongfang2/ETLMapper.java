@@ -1,0 +1,269 @@
+package com.cucrz.idss.hadoop.etl.mapreduce.map.impl.dongfang2;
+
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.text.ParseException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.mapred.Counters.Counter;
+import org.apache.hadoop.mapreduce.Mapper.Context;
+import org.mortbay.log.Log;
+
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.OtherConstants;
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.PlayStatus;
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.TypeConstans;
+import com.cucrz.idss.hadoop.etl.mapreduce.map.IETLMapper;
+import com.cucrz.idss.hadoop.etl.mapreduce.rules.DateCheck;
+import com.cucrz.idss.hadoop.etl.mapreduce.rules.FormCheck;
+import com.cucrz.idss.hadoop.etl.util.DateUtil;
+import com.cucrz.idss.hadoop.etl.util.ReadCacheUtil;
+
+public class ETLMapper implements IETLMapper {
+	private static Configuration conf = null;
+	private static Map<String, String> channelNameList = null;
+	private static Map<String, String> channelChannelList = null;
+	private static Map<String, String> VODInfoList = null;
+	private static Map<String, String> newChannel = null;
+	private static Map<String, String> newCloumn = null;
+
+	@Override
+	public Map<String, Map<String, String>> etlMapSetupDisCache(
+			Context context, Map<String, Map<String, String>> storage) {
+
+		Map<String, Map<String, String>> resultMap = new HashMap<String, Map<String, String>>();
+		Map<String, String> cacheFileNameMap = context.getConfiguration()
+				.getValByRegex("^idss_ETL_Cache");
+		Set<String> cacheFileNameSet = cacheFileNameMap.keySet();
+		for (String cacheFileName : cacheFileNameSet) {
+			cacheFileName = cacheFileNameMap.get(cacheFileName);
+			try {
+				BufferedReader reader = new BufferedReader(new FileReader(
+						cacheFileName));
+				resultMap.put(cacheFileName,
+						ReadCacheUtil.readCache(reader, cacheFileName));
+			} catch (Exception e) {
+				Log.warn("缓存文件格式或名称有误，请检查！");
+				e.printStackTrace();
+			}
+		}
+		return resultMap;
+	}
+
+	@Override
+	public Map<String, Counter> etlMapSetupGetCounter(Context context) {
+		Map<String, Counter> map = new HashMap<String, Counter>();
+		Counter mapTotleRows = (Counter) context.getCounter("map", "TotleRows");
+		Counter mapFmtError = (Counter) context
+				.getCounter("map", "mapFmtError");
+		Counter mapDateIdError = (Counter) context.getCounter("map",
+				"mapDateIdError");
+		Counter mapOutputRows = (Counter) context.getCounter("map",
+				"mapOutputRows");
+		map.put("TotleRows", mapTotleRows);
+		map.put("mapOutputRows", mapOutputRows);
+		map.put("mapFmtError", mapFmtError);
+		map.put("mapDateIdError", mapDateIdError);
+		return map;
+	}
+
+	@Override
+	public String etlMapper(String inputLine, String inFileName, String operId,
+			String inputDateID, Context context,
+			Map<String, Map<String, String>> storage,
+			Map<String, Counter> counterMap, Map<String, String> newChannel,
+			Map<String, String> newCloumn) {
+		this.newChannel = newChannel;
+		this.newCloumn = newCloumn;
+		conf = context.getConfiguration();
+		VODInfoList = storage.get(conf.get("idss_ETL_Cache_VODInfoList"));
+		channelNameList = storage.get(conf
+				.get("idss_ETL_Cache_NameToUniqueChannel"));
+		channelChannelList = storage.get(conf
+				.get("idss_ETL_Cache_OriginalChannelToUniqueChannel"));
+		Counter mapDateIdError = counterMap.get("mapDateIdError");
+		String record = "";
+		int fileIndex = inFileName.lastIndexOf(OtherConstants.FILE_SEPARATOR);
+		String fileName = inFileName.substring(fileIndex + 1);
+		record = getBizRecord(fileName, inputLine);
+		if (!record.equals("")) {
+			String[] s = record.split(OtherConstants.TAB_DELIM);
+			String[] split = s[1].split(OtherConstants.VERTICAL_DELIM_REGEX);
+			int index = split[0].indexOf(" ");
+			String date = "";
+			try {
+				date = split[0].substring(0, index);
+			} catch (Exception e) {
+				Log.warn("日期格式不正确，记录丢弃");
+				return "";
+			}
+			if (DateCheck.dateCheckRule(date, inputDateID)) {
+				return record;
+			} else {
+				mapDateIdError.increment(1);
+				return "";
+			}
+		} else {
+			return "";
+		}
+	}
+
+	public String getBizRecord(String inFileName, String inputLine) {
+		if (inFileName.equalsIgnoreCase("startup.txt")) {// 开关机数据
+			return getOCEvent(inputLine);
+		} else if (inFileName.equalsIgnoreCase("user.txt")) {// VOD,时移，
+			return getUserEvent(inputLine);
+		} else {
+			return "";
+		}
+	}
+
+	public String getOCEvent(String inputLine) {
+		StringBuffer tmp = new StringBuffer();
+		String record = "";
+		String[] split = inputLine.split(OtherConstants.VERTICAL_DELIM_REGEX);
+		if (split.length > 13) {
+			if (split[0].length() == 19) {
+				String date = split[0].substring(0, 10);
+				String time = split[0].substring(11, 19);
+				tmp.append(split[13]).append(OtherConstants.VERTICAL_DELIM)
+						.append(TypeConstans.default_Dongfang)
+						.append(OtherConstants.TAB_DELIM).append(date)
+						.append(" " + time)
+						.append(OtherConstants.VERTICAL_DELIM)
+						.append(TypeConstans.ON_CODE)
+						.append(OtherConstants.VERTICAL_DELIM).append("1");
+			}
+		}
+		record = tmp.toString();
+		return record;
+	}
+
+	public String getUserEvent(String inputLine) {
+		String[] split = inputLine.split(OtherConstants.VERTICAL_DELIM_REGEX);
+		StringBuffer tmp = new StringBuffer();
+		String record = "";
+		if (split.length > 6) {
+			if (!split[4].equals("E")) {
+				String date = "";
+				String time = "";
+				try {
+					date = DateUtil.DATE_FORMATER.format(Long
+							.parseLong(split[5]));
+					time = DateUtil.TIME_FORMATER.format(Long
+							.parseLong(split[5]));
+				} catch (Exception e) {
+					Log.warn("日期格式不正确，记录丢弃");
+					return "";
+				}
+				String other = translateBizType(split[3], split[6]);
+				if (!other.equals("")) {
+					tmp.append(split[0]).append(OtherConstants.VERTICAL_DELIM)
+							.append(TypeConstans.default_Dongfang)
+							.append(OtherConstants.TAB_DELIM)
+							.append(date + " " + time)
+							.append(OtherConstants.VERTICAL_DELIM);
+					tmp.append(other);
+				}
+			} else {
+				return "";
+			}
+		}
+		record = tmp.toString();
+		return record;
+	}
+
+	public String translatePlayStatus(String platStatus) {
+		if (platStatus.equals("ENTER")) {
+			return PlayStatus.STATUS_ENTER;
+		} else if (platStatus.equals("FFW")) {
+			return PlayStatus.STATUS_FASTFORWARD;
+		} else if (platStatus.equals("REW")) {
+			return PlayStatus.STATUS_REWIND;
+		} else if (platStatus.equals("PLAY")) {
+			return PlayStatus.STATUS_PLAY;
+		} else if (platStatus.equals("PAUSE")) {
+			return PlayStatus.STATUS_PAUSE;
+		} else if (platStatus.equals("EXIT")) {
+			return PlayStatus.STATUS_EXIT;
+		} else {
+			return "0";
+		}
+	}
+
+	public String translateBizType(String type, String bizSplit) {
+		if (type.equals("DVB")) {
+			return getLiveEvent(bizSplit);
+		} else if (type.equals("VOD")) {
+			return getVODProgramEvent(bizSplit);
+		} else if (type.equals("Services")) {
+			return getTeleAPPEvent(bizSplit);
+		} else if (type.equals("AdsPicView")) {
+			return getADEvent(bizSplit);
+		} else if (type.equals("POWEROFF")) {
+			return getCloseEvent(bizSplit);
+		} else {
+			return "";
+		}
+	}
+
+	public String getLiveEvent(String bizSplit) {
+		String[] bizPara = bizSplit.split("#");
+		StringBuffer tmp = new StringBuffer();
+		if (bizPara.length > 1) {
+			String uniqChannel = ReadCacheUtil
+					.getUniqueChannel(newChannel, channelNameList,
+							channelChannelList, "##"+bizPara[0], bizPara[1]);
+			tmp.append(TypeConstans.EVENT_LIVE_BIZ).append("||||0|1|")
+					.append(bizPara[0]).append(OtherConstants.VERTICAL_DELIM)
+					.append("").append(OtherConstants.VERTICAL_DELIM)
+					.append(uniqChannel);
+		}
+		return tmp.toString();
+	}
+
+	public String getVODProgramEvent(String bizSplit) {
+		String[] bizPara = bizSplit.split("#");
+		StringBuffer tmp = new StringBuffer();
+		if (bizPara.length > 0) {
+			tmp.append(TypeConstans.EVENT_VOD_PROGRAM_BIZ).append("|||0|0|")
+					.append(translatePlayStatus(bizPara[0])).append("|0|");
+		}
+		return tmp.toString();
+	}
+
+	public String getTeleAPPEvent(String bizSplit) {
+		String[] bizPara = bizSplit.split("#");
+		StringBuffer tmp = new StringBuffer();
+		if (bizPara.length > 2) {
+			tmp.append(TypeConstans.EVENT_VOD_TELEAPP)
+					.append(OtherConstants.VERTICAL_DELIM).append(bizPara[2]);
+		}
+		return tmp.toString();
+	}
+
+	public String getADEvent(String bizSplit) {
+		String[] bizPara = bizSplit.split("#");
+		StringBuffer tmp = new StringBuffer();
+		if (bizPara.length > 1) {
+			tmp.append(TypeConstans.EVENT_AFFECT_ADS)
+					.append(OtherConstants.VERTICAL_DELIM).append(bizPara[0])
+					.append("|0|0|").append(bizPara[1])
+					.append(OtherConstants.VERTICAL_DELIM)
+					.append(OtherConstants.VERTICAL_DELIM).append("0");
+		}
+		return tmp.toString();
+	}
+
+	public String getCloseEvent(String bizSplit) {
+		String[] bizPara = bizSplit.split("#");
+		StringBuffer tmp = new StringBuffer();
+		if (bizPara.length > 0) {
+			tmp.append(TypeConstans.OFF_CODE)
+					.append(OtherConstants.VERTICAL_DELIM).append(1);
+		}
+		return tmp.toString();
+	}
+}

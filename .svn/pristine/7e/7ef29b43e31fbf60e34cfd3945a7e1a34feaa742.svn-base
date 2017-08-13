@@ -1,0 +1,187 @@
+package com.cucrz.idss.hadoop.etl.mapreduce.map.impl.btv;
+
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.text.ParseException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.mapred.Counters.Counter;
+import org.apache.hadoop.mapreduce.Mapper.Context;
+
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.OtherConstants;
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.TypeConstans;
+import com.cucrz.idss.hadoop.etl.mapreduce.map.IETLMapper;
+import com.cucrz.idss.hadoop.etl.util.DateUtil;
+import com.cucrz.idss.hadoop.etl.util.ReadCacheUtil;
+
+/**
+ * BTV ETL Mapper
+ * @author qianzhiqin
+ * @creatTime 2015年7月7日 
+ */
+public class ETLMapper implements IETLMapper {
+	private static Configuration conf = null;
+	private static Map<String, String> channelName = null;
+	private static Map<String, String> channelChannel = null;
+	private static Map<String, String> VODInfoList = null;
+	private static Map<String, String> newChannel = null;
+	private static Map<String, String> newCloumn = null;
+
+	// mapper的计数器
+	@Override
+	public Map<String, Counter> etlMapSetupGetCounter(Context context) {
+		Map<String, Counter> map = new HashMap<String, Counter>();
+		Counter mapTotleRows = (Counter) context.getCounter("map", "TotleRows");
+		Counter mapOutputRows = (Counter) context.getCounter("map",
+				"mapOutputRows");
+		Counter mapFmtError = (Counter) context
+				.getCounter("map", "mapFmtError");
+		Counter mapDateIdError = (Counter) context.getCounter("map",
+				"mapDateIdError");
+		map.put("TotleRows", mapTotleRows);
+		map.put("mapOutputRows", mapOutputRows);
+		map.put("mapFmtError", mapFmtError);
+		map.put("mapDateIdError", mapDateIdError);
+		return map;
+	}
+
+	@Override
+	public String etlMapper(String inputLine, String inFilename, String operId,
+			String inputDateID, Context context,
+			Map<String, Map<String, String>> storage,
+			Map<String, Counter> counterMap, Map<String, String> newChannel,
+			Map<String, String> newCloumn) {
+		this.newChannel = newChannel;
+		this.newCloumn = newCloumn;
+		conf = context.getConfiguration();
+		VODInfoList = storage.get(conf.get("idss_ETL_Cache_VODInfoList"));
+		channelName = storage.get(conf.get("idss_ETL_Cache_NameToUniqueChannel"));
+		channelChannel = storage.get(conf.get("idss_ETL_Cache_OriginalChannelToUniqueChannel"));
+		Counter mapFmtError = counterMap.get("mapFmtError");
+		Counter mapDateIdError = counterMap.get("mapDateIdError");
+		
+		String areaCode = "010200";
+		String action = "";
+		String head= "";
+		if(inFilename.contains("Contentviewlog")){
+			String[] split = inputLine.split(OtherConstants.VERTICAL_DELIM_REGEX);
+			if(split.length >= 6){
+				head = split[0]+OtherConstants.VERTICAL_DELIM + areaCode;
+				String ServiceType = split[3];
+			
+				if("1".equals(ServiceType)){
+					// VOD
+					action = parseVOD(split, inputDateID);
+				}else if("2".equals(ServiceType)){
+					// Live TV
+					action = parseLive(split, inputDateID);
+				}else if("3".equals(ServiceType)){
+					action = parseLookback(split, inputDateID);
+				}
+			}
+		}
+		if(action==null){	
+			return "";
+		}
+		return head+OtherConstants.TAB_DELIM+action;
+	}
+
+
+	
+
+	@Override
+	public Map<String, Map<String, String>> etlMapSetupDisCache(
+			Context context, Map<String, Map<String, String>> storage) {
+		Map<String, Map<String, String>> resultMap = new HashMap<String, Map<String, String>>();
+		Map<String, String> cacheFileNameMap = context.getConfiguration()
+				.getValByRegex("^idss_ETL_Cache");
+		Set<String> cacheFileNameSet = cacheFileNameMap.keySet();
+		for (String cacheFileName : cacheFileNameSet) {
+			cacheFileName = cacheFileNameMap.get(cacheFileName);
+
+			//本地调试
+			String localFileName = "E:/conf/"+cacheFileName;
+			
+			try {
+				BufferedReader reader = new BufferedReader(new FileReader(cacheFileName));
+				resultMap.put(cacheFileName,ReadCacheUtil.readCache(reader, cacheFileName));
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+		}
+		return resultMap;
+	}
+	
+	private String parseVOD(String[] split,String inputDateID){
+		StringBuffer result = new StringBuffer();
+		String dateStr = "";
+		try {
+			String compTime =  DateUtil.getFormatDateStr(split[1], DateUtil.DATE_TIME_FULL, DateUtil.DATEFORMATER);
+			if(!compTime.equals(inputDateID)){
+				return null;
+			}
+			dateStr = DateUtil.getFormatDateStr(split[1], DateUtil.DATE_TIME_FULL, DateUtil.DATE_TIME_FORMATER);
+			result.append(TypeConstans.EVENT_VOD_PROGRAM_BIZ + OtherConstants.VERTICAL_DELIM);
+//			影片ID 影片名称  影片分集数
+			result.append(OtherConstants.VERTICAL_DELIM+split[5]+OtherConstants.VERTICAL_DELIM+OtherConstants.VERTICAL_DELIM);
+//			当前节目播放时间      节目播放状态          栏目ID
+			result.append(OtherConstants.VERTICAL_DELIM+"1"+OtherConstants.VERTICAL_DELIM+OtherConstants.VERTICAL_DELIM);
+//			栏目名称      供应商ID   点播路径      节目总时长
+			result.append(OtherConstants.VERTICAL_DELIM+OtherConstants.VERTICAL_DELIM+OtherConstants.VERTICAL_DELIM);
+
+		} catch (ParseException e) {
+			return null;
+		}
+		return dateStr + OtherConstants.VERTICAL_DELIM+ result;
+	}
+	
+	private String parseLive(String[] split, String inputDateID) {
+		StringBuffer result = new StringBuffer();
+		String dateStr = "";
+		try {
+			String compTime =  DateUtil.getFormatDateStr(split[1], DateUtil.DATE_TIME_FULL, DateUtil.DATEFORMATER);
+			if(!compTime.equals(inputDateID)){
+				return null;
+			}
+
+			dateStr = DateUtil.getFormatDateStr(split[1], DateUtil.DATE_TIME_FULL, DateUtil.DATE_TIME_FORMATER);
+			result.append(TypeConstans.EVENT_LIVE_BIZ + OtherConstants.VERTICAL_DELIM);
+//			Network_ID  TS_ID  Service_ID
+			result.append(OtherConstants.VERTICAL_DELIM+OtherConstants.VERTICAL_DELIM+split[4]+OtherConstants.VERTICAL_DELIM);
+//			直播频道换台方式   直播频道播放状态  逻辑频道号
+			result.append(OtherConstants.VERTICAL_DELIM+OtherConstants.VERTICAL_DELIM+split[4]+OtherConstants.VERTICAL_DELIM);
+//			频道名称    当前统一频道编号
+			result.append(split[5]+OtherConstants.VERTICAL_DELIM+split[4]);
+
+		} catch (ParseException e) {
+			return null;
+		}
+		return dateStr + OtherConstants.VERTICAL_DELIM+ result;
+	}
+	
+	private String parseLookback(String[] split, String inputDateID) {
+		StringBuffer result = new StringBuffer();
+		String dateStr = "";
+		try {
+			String compTime =  DateUtil.getFormatDateStr(split[1], DateUtil.DATE_TIME_FULL, DateUtil.DATEFORMATER);
+			if(!compTime.equals(inputDateID)){
+				return null;
+			}
+
+			dateStr = DateUtil.getFormatDateStr(split[1], DateUtil.DATE_TIME_FULL, DateUtil.DATE_TIME_FORMATER);
+			result.append(TypeConstans.EVENT_LOOKBACK_PRO_BIZ + OtherConstants.VERTICAL_DELIM);
+//			节目ID   回看节目名称        回看频道名称
+			result.append(split[4]+OtherConstants.VERTICAL_DELIM+OtherConstants.VERTICAL_DELIM+split[5]+OtherConstants.VERTICAL_DELIM);
+//			节目播出日期    节目播出时间   当前节目播放时间          节目播放状态
+			result.append(OtherConstants.VERTICAL_DELIM+OtherConstants.VERTICAL_DELIM+OtherConstants.VERTICAL_DELIM+"1");
+
+		} catch (ParseException e) {
+			return null;
+		}
+		return dateStr + OtherConstants.VERTICAL_DELIM+ result;
+	}
+	
+}

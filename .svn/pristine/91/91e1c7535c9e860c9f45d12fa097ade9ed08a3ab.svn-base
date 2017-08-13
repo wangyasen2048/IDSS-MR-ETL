@@ -1,0 +1,150 @@
+package com.cucrz.idss.hadoop.etl.util.excelOutIn;
+
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.TimeZone;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
+
+import org.apache.log4j.Logger;
+import org.apache.poi.EncryptedDocumentException;
+import org.apache.poi.hssf.usermodel.HSSFWorkbook;
+import org.apache.poi.ss.usermodel.Cell;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.ss.usermodel.Sheet;
+import org.apache.poi.ss.usermodel.Workbook;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
+
+import com.cucrz.idss.hadoop.etl.synchronizeBaseData.connect2Mysql;
+
+public class WriteOutData {
+	private static Logger log = Logger.getLogger(EnterData.class);
+
+	public static void main(String[] args) {
+
+		Map<String, String> arg = new HashMap<String, String>();
+		arg.put("url", "jdbc:mysql://192.168.20.24:3306/datamart_btv");
+		arg.put("username", "cucrz");
+		arg.put("password", "123456");
+		String filePath = "C:\\Users\\Administrator\\Desktop\\hello.xlsdd";
+		run(arg, filePath);
+	}
+
+	public static void run(Map<String, String> databaseInfo, String filePath) {
+		SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss:SS");
+		TimeZone t = sdf.getTimeZone();
+		t.setRawOffset(1);
+		sdf.setTimeZone(t);
+		Long startTime = System.currentTimeMillis();
+		String houzui = filePath.split("\\.")[1];
+		if(!houzui.equals("xsl")&&!houzui.equals("xslx")){
+			houzui = "xlsx";
+		}
+		String cn = "com.cucrz.idss.hadoop.etl.WriteOutData$MysqlIntoSheet" + houzui ;
+		try {
+			MysqlIntoSheet sim = (MysqlIntoSheet) Class.forName(cn).newInstance();
+			sim.writeSheet(filePath);
+			sim.writeMysql(databaseInfo);
+		} catch (ClassNotFoundException | InstantiationException | IllegalAccessException e) {
+			e.printStackTrace();
+		}
+		Long endTime = System.currentTimeMillis();
+		System.out.println("用时：" + sdf.format(new Date(endTime - startTime)));
+
+	}
+
+	static abstract class MysqlIntoSheet {
+		Workbook workbook = null;
+		Sheet sheet = null;
+		Row row = null;
+		Cell cell = null;
+		String strPath =null;
+		FileOutputStream fileoutputstream = null;
+
+		public abstract void writeSheet(String strPath);
+
+		public void writeMysql(Map<String, String> args) {
+			String sqlPrement = "select * from dim_employee";
+			System.out.println("查询语句:" + sqlPrement);
+			sheet = workbook.createSheet("employee");
+			connect2Mysql cm = connect2Mysql.getInstance();
+			Connection conn = null;
+			PreparedStatement pstmt = null;
+			ResultSet rs = null;
+
+			try {
+				
+				conn = cm.getConnect(args);
+				pstmt = conn.prepareStatement(sqlPrement);
+				rs = pstmt.executeQuery();
+				ResultSetMetaData rsmd = rs.getMetaData();
+				row = sheet.createRow(0);
+				for (int i = 0; i < rsmd.getColumnCount(); i++) {
+					cell = row.createCell(i);
+					cell.setCellValue(rsmd.getColumnName(i + 1));
+				}
+				int j = 1;
+				while (rs.next()) {
+					row = sheet.createRow(j++);
+					for (int i = 0; i < rsmd.getColumnCount(); i++) {
+						cell = row.createCell(i);
+						if (rsmd.getColumnTypeName(i+1).equals("BIGINT")) {
+							cell.setCellValue(rs.getInt(rsmd.getColumnName(i + 1)));
+						} else if(rsmd.getColumnTypeName(i+1).equals("VARCHAR")){
+							cell.setCellValue(rs.getString(rsmd.getColumnName(i + 1)));
+						}
+					}
+				}
+				System.out.println(this.strPath);
+				fileoutputstream = new FileOutputStream(strPath);
+				workbook.write(fileoutputstream);
+			} catch (SQLException | IOException e) {
+				log.warn("更新失败！错误的频道====" + e.toString());
+			} finally
+
+			{
+				try {
+					 if(null != fileoutputstream){ 
+						 fileoutputstream.close(); 
+				        } 
+					conn.close();			
+				} catch (SQLException | IOException e) {
+					log.warn("连接关闭异常！");
+					e.printStackTrace();
+				}
+				log.info("-----------录入数据库完成！-----------");
+
+			}
+		}
+	}
+
+	static class MysqlIntoSheetxls extends MysqlIntoSheet {
+
+		@Override
+		public void writeSheet(String strPath) {
+			try {
+
+				workbook = new HSSFWorkbook();
+				this.strPath = strPath;
+			} catch (EncryptedDocumentException e) {
+				e.printStackTrace();
+			}
+		}
+	}
+
+	static class MysqlIntoSheetxlsx extends MysqlIntoSheet {
+		@Override
+		public void writeSheet(String strPath) {
+			workbook = new XSSFWorkbook();
+			this.strPath = strPath;
+		}
+
+	}
+}

@@ -1,0 +1,619 @@
+package com.cucrz.idss.hadoop.etl.mapreduce.map.impl.henan;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.net.URI;
+import java.text.ParseException;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Pattern;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.mapred.Counters.Counter;
+import org.apache.hadoop.mapreduce.Mapper.Context;
+import org.apache.log4j.Logger;
+import org.dom4j.Document;
+import org.dom4j.DocumentException;
+import org.dom4j.DocumentHelper;
+import org.dom4j.Element;
+import org.dom4j.io.SAXReader;
+import org.mortbay.log.Log;
+
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.OtherConstants;
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.TypeConstans;
+import com.cucrz.idss.hadoop.etl.mapreduce.map.IETLMapper;
+import com.cucrz.idss.hadoop.etl.mapreduce.rules.DateCheck;
+import com.cucrz.idss.hadoop.etl.util.DateUtil;
+import com.cucrz.idss.hadoop.etl.util.ReadCacheUtil;
+
+/**
+ * 河南ETL Mapper
+ * @author qianzhiqin
+ * 
+ * @creatTime 2015年4月13日 
+ */
+@SuppressWarnings("all")
+public class ETLMapper implements IETLMapper {
+	private static Logger log = Logger.getLogger(ETLMapper.class);
+	private static Configuration conf;
+	private static Map<String, String> channelName;
+	private static Map<String, String> channelChannel;
+	private static Map<String, String> regionCodeList;
+	private static Map<String, String> VODInfoList = null;
+	private static Map<String, String> newChannel = null;
+	private static Map<String, String> newCloumn = null;
+
+	//confMap
+	private static Map<String, Map> applicationMap = new HashMap<String, Map>() ;
+	private static Map<String, String> businessMap = new HashMap<String, String>();
+	private static Map<String, String> categoryMap = new HashMap<String, String>();
+	private static Map<String, String> assetMap = new HashMap<String, String>();
+	
+	private static FileSystem fs = null;
+	private static InputStream in = null;
+	
+	/**
+	 * 生成 {@link Counter }的计数器，可对数据进行统计
+	 */
+	@Override
+	public Map<String, Counter> etlMapSetupGetCounter(Context context) {
+		Map<String, Counter> map = new HashMap<String, Counter>();
+		Counter mapTotleRows = (Counter) context.getCounter("map", "TotleRows");
+		Counter mapFmtError = (Counter) context.getCounter("map", "mapFmtError");
+		Counter mapDateIdError = (Counter) context.getCounter("map","mapDateIdError");
+		Counter mapOutputRows = (Counter) context.getCounter("map","mapOutputRows");
+		map.put("TotleRows", mapTotleRows);
+		map.put("mapOutputRows", mapOutputRows);
+		map.put("mapFmtError", mapFmtError);
+		map.put("mapDateIdError", mapDateIdError);
+		//readConf
+		Configuration configuration = context.getConfiguration();
+		String inputDateID = configuration.get("inputDateID");
+		String prePath = configuration.get("fs.defaultFS")
+				+ OtherConstants.FILE_SEPARATOR + configuration.get("dataSourcePath")
+				+ OtherConstants.FILE_SEPARATOR + configuration.get("operatorID")
+				+ OtherConstants.FILE_SEPARATOR + configuration.get("inputDateID")
+				+ OtherConstants.FILE_SEPARATOR;
+//		prePath = "hdfs://192.168.20.21:8020/tmp/test/1601/20150505/";
+		initConf(inputDateID, prePath);
+		return map;
+	}
+
+	@Override
+	public String etlMapper(String inputLine, 
+							String inFilename, 
+							String operId,
+							String inputDateID, 
+							Context context,
+							Map<String, Map<String, String>> storage,
+							Map<String, Counter> counterMap, 
+							Map<String, String> newChannel,
+							Map<String, String> newCloumn) {
+		Counter mapDateIdError = counterMap.get("mapDateIdError");
+		this.newChannel = newChannel;
+		this.newCloumn = newCloumn;
+		conf = context.getConfiguration();
+		VODInfoList = storage.get(conf.get("idss_ETL_Cache_VODInfoList"));
+		channelName = storage.get(conf.get("idss_ETL_Cache_NameToUniqueChannel"));
+		channelChannel = storage.get(conf.get("idss_ETL_Cache_OriginalChannelToUniqueChannel"));
+		String record = "";
+		try {
+			if (inFilename.contains("boot") || inFilename.contains("action")){
+				String[] split = inputLine.split(OtherConstants.COMMA_DELIM);
+				String[] firstSplit = split[0].split(OtherConstants.VERTICAL_DELIM_REGEX);
+				if(firstSplit.length<2){
+					return record;
+				}else{
+					String regionCode = RegionCode.valueOf(firstSplit[0]).getCode();
+					if(split.length > 2){
+						if( firstSplit[1].length()!=20){
+							return record;
+						}
+						String userId = "hn" + split[2];
+						record =  userId + OtherConstants.VERTICAL_DELIM +regionCode+ OtherConstants.TAB_DELIM ;
+						//处理 boot 数据
+						if(inFilename.contains("boot")){
+							String boot = parseBoot(split,inputDateID) ;
+							if("".equals(boot)||boot==null){
+								return "";
+							}else{
+								record += boot;
+							}
+						}else if(inFilename.contains("action")){
+							//处理action 数据	
+							String action = parseAction(split,inputDateID) ;
+							if ("".equals(action) || action == null){
+								return "";
+							}else{
+								record += action;
+							}
+						}
+					}else{
+						mapDateIdError.increment(1l);
+						System.out.println(" error !!!");
+						return record;
+					}
+				}
+			}else if(inFilename.contains("playlog") ){
+				//处理vod数据
+				try {
+					record = parserPlaylog(inputLine);
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
+			}else if(inFilename.contains("businessrecord") ){
+				record =parserBusinessRecord(inputLine);
+			}else if(inFilename.contains("applicationrecord") ){
+				record =parserApplicationRecord(inputLine);
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+			return record;
+		}
+		return record;
+	}
+	
+	@Override
+	public Map<String, Map<String, String>> etlMapSetupDisCache(Context context, Map<String, Map<String, String>> storage) {
+		Map<String, Map<String, String>> resultMap = new HashMap<String, Map<String, String>>();
+		Map<String, String> cacheFileNameMap = context.getConfiguration().getValByRegex("^idss_ETL_Cache");
+		Set<String> cacheFileNameSet = cacheFileNameMap.keySet();
+		
+		for (String cacheFileName : cacheFileNameSet) {
+			cacheFileName = cacheFileNameMap.get(cacheFileName);
+			
+			//本地调试
+//			cacheFileName = "E:/conf/"+cacheFileName;
+			
+			try {
+				BufferedReader reader = new BufferedReader(new FileReader(cacheFileName));
+				resultMap.put(cacheFileName,ReadCacheUtil.readCache(reader, cacheFileName));
+			} catch (Exception e) {
+				Log.warn("缓存文件格式或名称有误，请检查！");
+				e.printStackTrace();
+			}
+		}
+		return resultMap;
+	}
+
+	
+	/**
+	 * 处理Boot的一行信息 <br/>
+	 * 并对日期进行校验，对非输入日期的数据行丢弃
+	 * 
+	 * @param split 
+	 * @param inputDateID 
+	 * @return 
+	 */
+	private String parseBoot(String[] split,String inputDateID){
+		String time = "";
+		try {
+			String compTime =  DateUtil.getFormatDateStr(split[1], DateUtil.DATE_TIME_FORMATER_HENAN, DateUtil.DATEFORMATER);
+			if(!inputDateID.equals(compTime)){
+				return "";
+			}
+			time = DateUtil.getFormatDateStr(split[1], DateUtil.DATE_TIME_FORMATER_HENAN, DateUtil.DATE_TIME_FORMATER);
+		} catch (Exception e) {
+			log.error(" Mapper >> 转换日期错误, 舍去");
+			return "";
+		}
+		return time + OtherConstants.VERTICAL_DELIM + TypeConstans.ON_CODE + OtherConstants.VERTICAL_DELIM + "1";
+	}
+	
+	/**
+	 * 处理Action的一行信息<br/>
+	 * @param split
+	 * @return
+	 */
+	private String parseAction(String[] split,String inputDateID){
+		String[] splitSplit = split[1].split(OtherConstants.COLON_DELIM);
+		String time = "";
+		String result = "";
+		if (splitSplit.length >= 1) {
+			try {
+				String compTime =  DateUtil.getFormatDateStr(splitSplit[0], DateUtil.DATE_TIME_FULL, DateUtil.DATEFORMATER);
+				if(!inputDateID.equals(compTime)){
+					return "";
+				}
+				time = DateUtil.getFormatDateStr(splitSplit[0], DateUtil.DATE_TIME_FULL, DateUtil.DATE_TIME_FORMATER);
+			} catch (ParseException e) {
+				log.error(" Mapper >> 转换日期错误, 舍去");
+				return "";
+			}
+			result = ActionType.getActionType(splitSplit, newChannel, channelName, channelChannel, VODInfoList, newCloumn);
+		}
+		if("".equals(result) || result==null){
+			return "";
+		}else{
+			return time + OtherConstants.VERTICAL_DELIM + result;
+		}
+	}
+	
+	/**
+	 * 处理 点播记录信息<br>
+	 * resourceid 以VODC...开头为   节目回看，resourceid 为影片id,node_id 为栏目id<br>
+	 * resourceid 不是以VODC...开头为  频道回放，node_id为空，resourceid 为栏目id<br>
+	 * 并在最后加上了servicename
+	 * <br>
+	 * <pre>@userId@serviceid@servicename@price@duration@productID@resourceid @playtime@url@type@node_id@source@status<br></pre>
+	 * @param inputLine
+	 * @return
+	 */
+	private String parserPlaylog(String inputLine){
+		StringBuffer result = new StringBuffer();
+		String[] split = inputLine.split("@");
+		String userId = "hn"+split[1];
+		String time = split[8];
+		String id = split[7];
+		String name = split[3];
+//		String ss = split[11];
+//		System.out.println(name);
+		result.append(userId + OtherConstants.VERTICAL_DELIM + TypeConstans.default_Henan + OtherConstants.TAB_DELIM +time + OtherConstants.VERTICAL_DELIM );
+//		2、	Playlog文件中，云电视-频道回放、频道回放免费商品为回看业务。
+//		3、	Playlog文件中，互动点播为点播业务。（需要点播路径数据）
+//		<showPath>节目回看/节目回看/我们都爱笑</showPath> 	为路径
+//
+//		4、	Playlog文件中，节目回看为自定义业务1，数据格式和  互动点播一样。（需要点播路径数据）
+//
+//		5、	Playlog文件中，虚拟双向付费产品 为自定义业务2，数据格式和   互动点播一样。
+//		6、	Playlog文件中，业务名称在上述没有的，为自定义业务3，输出为：最后输出为：userId| 410000|playtime|业务ID|业务名称|
+		if(name.contains("云电视-频道回放")||name.contains("频道回放免费商品")){
+			String channelName = categoryMap.get(id)==null?"":categoryMap.get(id).split("&")[1];
+			String programId = split[6];
+			//回看节目播放
+			result.append(TypeConstans.EVENT_LOOKBACK_PRO_BIZ+OtherConstants.VERTICAL_DELIM );
+
+			//节目ID  回看节目名称  回看频道名称
+			result.append(programId+OtherConstants.VERTICAL_DELIM + OtherConstants.VERTICAL_DELIM + channelName+OtherConstants.VERTICAL_DELIM );
+			//节目播出日期  节目播出时间  当前节目播放时间  节目播放状态
+			result.append(OtherConstants.VERTICAL_DELIM +OtherConstants.VERTICAL_DELIM +OtherConstants.VERTICAL_DELIM +"1");
+			
+		}else if(name.contains("互动点播")){
+			//VOD节目播放
+			result.append(TypeConstans.EVENT_VOD_PROGRAM_BIZ+OtherConstants.VERTICAL_DELIM );
+			
+			//以VODC...开头  resourceid 为影片id,node_id 为栏目id
+			String videoName = assetMap.get(id)==null?"":assetMap.get(id); 
+			String colunmId = split[11];
+			String columnName = categoryMap.get(colunmId)==null?"":categoryMap.get(colunmId).split("&")[0]; 
+			String url = categoryMap.get(colunmId)==null?"":categoryMap.get(colunmId).split("&")[1];
+			//影片ID 影片名称  影片分集数
+			result.append(id + OtherConstants.VERTICAL_DELIM + videoName + OtherConstants.VERTICAL_DELIM + "0" + OtherConstants.VERTICAL_DELIM );
+			//当前节目播放时间   节目播放状态   栏目ID
+			result.append("0" + OtherConstants.VERTICAL_DELIM + "1" +OtherConstants.VERTICAL_DELIM +colunmId+ OtherConstants.VERTICAL_DELIM );
+			//栏目名称  供应商ID 点播路径   节目总时长
+			result.append(columnName + OtherConstants.VERTICAL_DELIM + OtherConstants.VERTICAL_DELIM + url +OtherConstants.VERTICAL_DELIM );
+
+		}else if(name.contains("节目回看")){
+			//节目回看为自定义业务1，数据格式和  互动点播一样。（需要点播路径数据）
+			result.append("4097"+OtherConstants.VERTICAL_DELIM );
+			
+			//以VODC...开头  resourceid 为影片id,node_id 为栏目id
+			String videoName = assetMap.get(id)==null?"":assetMap.get(id); 
+			String colunmId = split[11];
+			String columnName = categoryMap.get(colunmId)==null?"":categoryMap.get(colunmId).split("&")[0]; 
+			String url = categoryMap.get(colunmId)==null?"":categoryMap.get(colunmId).split("&")[1];
+			//影片ID 影片名称  影片分集数
+			result.append(id + OtherConstants.VERTICAL_DELIM + videoName + OtherConstants.VERTICAL_DELIM + "0" + OtherConstants.VERTICAL_DELIM );
+			//当前节目播放时间   节目播放状态   栏目ID
+			result.append("0" + OtherConstants.VERTICAL_DELIM + "1" +OtherConstants.VERTICAL_DELIM +colunmId+ OtherConstants.VERTICAL_DELIM );
+			//栏目名称  供应商ID 点播路径   节目总时长
+			result.append(columnName + OtherConstants.VERTICAL_DELIM + OtherConstants.VERTICAL_DELIM + url +OtherConstants.VERTICAL_DELIM );
+			
+		}else if(name.contains("虚拟双向付费产品")){
+			//虚拟付费双向产品为自定义业务2，数据格式和   互动点播一样
+			result.append("4098"+OtherConstants.VERTICAL_DELIM );
+			
+			//以VODC...开头  resourceid 为影片id,node_id 为栏目id
+			String videoName = assetMap.get(id)==null?"":assetMap.get(id); 
+			String colunmId = split[11];
+			String columnName = categoryMap.get(colunmId)==null?"":categoryMap.get(colunmId).split("&")[0]; 
+			String url = categoryMap.get(colunmId)==null?"":categoryMap.get(colunmId).split("&")[1];
+			//影片ID 影片名称  影片分集数
+			result.append(id + OtherConstants.VERTICAL_DELIM + videoName + OtherConstants.VERTICAL_DELIM + "0" + OtherConstants.VERTICAL_DELIM );
+			//当前节目播放时间   节目播放状态   栏目ID
+			result.append("0" + OtherConstants.VERTICAL_DELIM + "1" +OtherConstants.VERTICAL_DELIM +colunmId+ OtherConstants.VERTICAL_DELIM );
+			//栏目名称  供应商ID 点播路径   节目总时长
+			result.append(columnName + OtherConstants.VERTICAL_DELIM + OtherConstants.VERTICAL_DELIM + url +OtherConstants.VERTICAL_DELIM );
+		}else{
+			//业务名称在上述没有的，为自定义业务3，输出为：最后输出为：userId| 410000|playtime|业务ID|业务名称|
+			
+			result.append("4099"+OtherConstants.VERTICAL_DELIM );
+			result.append(split[2]+OtherConstants.VERTICAL_DELIM + name );
+		}
+
+//		System.out.println(result.toString());
+		return result.toString();
+	}
+	
+	/**
+	 * 处理BusinessRecord的一行信息 ,转化为图文应用<br/>
+	 * @param inputLine
+	 * @return
+	 */
+	private String parserBusinessRecord(String inputLine){
+		StringBuffer result = new StringBuffer();
+		String[] split = inputLine.split(OtherConstants.VERTICAL_DELIM_REGEX);
+		if(split.length ==3){
+			String id = split[2];
+			String name = businessMap.get(id)==null?"":businessMap.get(id);
+			String url = "/businessRecord";
+			result.append("hn"+ split[0] + OtherConstants.VERTICAL_DELIM + TypeConstans.default_Henan + OtherConstants.TAB_DELIM );
+			result.append(split[1] + OtherConstants.VERTICAL_DELIM +TypeConstans.EVENT_VOD_TELEAPP + OtherConstants.VERTICAL_DELIM );
+			result.append(url + OtherConstants.VERTICAL_DELIM + id + OtherConstants.VERTICAL_DELIM + name);
+		}
+		return result.toString();
+	}
+	
+	/**
+	 * 处理ApplicationRecord的一行信息 ,转化为图文应用<br/>
+	 * @param inputLine
+	 * @return
+	 */
+	private String parserApplicationRecord(String inputLine){
+		StringBuffer result = new StringBuffer();
+		String[] split = inputLine.split(OtherConstants.VERTICAL_DELIM_REGEX);
+		if(split.length ==3){
+			String id = split[2];
+			Map map = applicationMap.get(id);
+			String name = "";
+			String url = "";
+			if(map!=null){
+				name = map.get("name")==null?"":map.get("name").toString();
+				url = map.get("url")==null?"":map.get("url").toString();
+			}else{
+				name = "";
+				url = "/applicationRecord";
+			}
+			result.append("hn"+ split[0] + OtherConstants.VERTICAL_DELIM + TypeConstans.default_Henan + OtherConstants.TAB_DELIM );
+			result.append(split[1] + OtherConstants.VERTICAL_DELIM +TypeConstans.EVENT_VOD_TELEAPP + OtherConstants.VERTICAL_DELIM );
+			result.append(url + OtherConstants.VERTICAL_DELIM + id + OtherConstants.VERTICAL_DELIM + name);
+		}
+		return result.toString();
+	}
+	/**
+	 * 将 Category转为map
+	 * @return
+	 */
+	private static Map<String, String> getCategory(String url){
+		Map<String, String> map = new HashMap<String, String>();
+		SAXReader reader = new SAXReader();  
+        Document doc = null;
+		Configuration conf = new Configuration();
+//		FileSystem fs = null;
+//		InputStream in = null;
+		try {
+			fs = FileSystem.get(URI.create(url), conf);
+			in = fs.open(new Path(url));
+			doc = reader.read(in);  
+			Element rootElement = doc.getRootElement();
+			ele2map2(map, rootElement);
+		} catch (Exception e) {
+			log.error(" Category 栏目分类文件转换错误...");
+		}finally{
+//			if(in!=null){
+//				try {
+//					in.close();
+//				} catch (IOException e) {
+//					e.printStackTrace();
+//				}
+//			}
+//			if(fs!=null){
+//				try {
+//					fs.close();
+//				} catch (IOException e) {
+//					e.printStackTrace();
+//				}
+//			}
+		}
+		return map;
+	}
+	
+	/**
+	 * 将 Asset转为map,得到影片资源
+	 * @return
+	 */
+	private static Map<String, String> getAsset(String url) {
+		Map<String, String> map = new HashMap<String, String>();
+		Configuration conf = new Configuration();
+//		FileSystem fs = null;
+//		InputStream in = null;
+		try {
+			fs = FileSystem.get(URI.create(url), conf);
+			in = fs.open(new Path(url));
+			BufferedReader in2 =new BufferedReader(new InputStreamReader(in));
+			String line="";
+			while((line=in2.readLine())!=null){
+				try {
+					String[] spilt = line.split(Pattern.quote("|"));
+					if(spilt.length >= 2){
+						String key = spilt[0];
+						String value = spilt[1];
+						map.put(key, value);
+					}
+				} catch (Exception e) {
+					continue;
+				}
+			}
+		} catch (IOException e) {
+			e.printStackTrace();
+			log.error(" 找不到Asset影片资源转换错误...");
+		}finally{
+//			if(in!=null){
+//				try {
+//					in.close();
+//				} catch (IOException e) {
+//					e.printStackTrace();
+//				}
+//			}
+//			if(fs!=null){
+//				try {
+//					fs.close();
+//				} catch (IOException e) {
+//					e.printStackTrace();
+//				}
+//			}
+		}
+		return map;
+	}
+	
+	/**
+	 * 将 Business转为map,得到第三方业务信息
+	 * @param fileName
+	 * @return
+	 */
+	private static Map<String, String> getBusiness(String url) {
+		Map<String, String> map = new HashMap<String, String>();
+		Configuration conf = new Configuration();
+//		FileSystem fs = null;
+//		InputStream in = null;
+		try {
+			fs = FileSystem.get(URI.create(url), conf);
+			in = fs.open(new Path(url));
+			BufferedReader in2 =new BufferedReader(new InputStreamReader(in));
+			String line="";
+			while((line=in2.readLine())!=null){
+				try {
+					String[] spilt = line.split(Pattern.quote("|"));
+					if(spilt.length >= 2){
+						String key = spilt[0];
+						String value = spilt[1];
+						map.put(key, value);
+					}
+				} catch (Exception e) {
+					continue;
+				}
+			}
+		} catch (IOException e) {
+			log.error(" 找不到Business第三方业务信息...");
+		}finally{
+//			if(in!=null){
+//				try {
+//					in.close();
+//				} catch (IOException e) {
+//					e.printStackTrace();
+//				}
+//			}
+//			if(fs!=null){
+//				try {
+//					fs.close();
+//				} catch (IOException e) {
+//					e.printStackTrace();
+//				}
+//			}
+		}
+		return map;
+	}
+	/**
+	 * 
+	 * 将 Application转为map,得到第三方业务信息
+	 * @param fileName
+	 * @return
+	 */
+	private static Map<String, Map> getApplication(String url) {
+		Map<String, Map> map = new HashMap<String, Map>();
+				
+		Configuration conf = new Configuration();
+//		FileSystem fs = null;
+//		InputStream in = null;
+		try {
+			fs = FileSystem.get(URI.create(url), conf);
+			in = fs.open(new Path(url));
+			BufferedReader in2 =new BufferedReader(new InputStreamReader(in));
+			String line="";
+			while((line=in2.readLine())!=null){
+				try {
+					String[] spilt = line.split(Pattern.quote("|"));
+					Map<String, String> valueMap = new HashMap<String, String>();
+					if(spilt.length == 4){
+						String key = spilt[0];
+						String name = spilt[1];
+						String url1 = spilt[3];
+						valueMap.put("url", url1);
+						valueMap.put("name", name);
+						map.put(key, valueMap);
+					}
+				} catch (Exception e) {
+					continue;
+				}
+			}
+		} catch (IOException e) {
+			log.error(" 找不到Application第三方业务信息...");
+		}finally{
+//			if(in!=null){
+//				try {
+//					in.close();
+//				} catch (IOException e) {
+//					e.printStackTrace();
+//				}
+//			}
+//			if(fs!=null){
+//				try {
+//					fs.close();
+//				} catch (IOException e) {
+//					e.printStackTrace();
+//				}
+//			}
+		}
+		return map;
+	}
+	
+	/**
+	 * 递归 把element 转为 map 
+	 * @param map
+	 * @param ele
+	 */
+	private static void ele2map2(Map map, Element ele) {
+		if("node".equals(ele.getName())){
+			map.put(ele.attribute("id").getText(), ele.element("name").getText()+"&"+ele.element("showPath").getText());
+		}
+		// 获得当前节点的子节点,如果只有一个子节点说明不用考虑list的情况，直接继续递归即可
+		List<Element> elements = ele.elements();
+		if (elements.size() > 0) {
+			for (int i = 0; i < elements.size(); i++) {
+				ele2map2(map, elements.get(i));
+			}
+		} 
+	}
+	
+	/**
+	 *读取文件并生成confMap<br>
+	 *读取配置文件的时候，文件名字不能出现‘[]’种符号
+	 */
+	private void initConf(String date,String prePath) {
+		//application_[20150501].dat
+		String applicationPath =prePath+"application_"+date+".dat";
+		String assetPath =prePath+"asset_"+date+".dat";
+		String businessPath =prePath+"business_"+date+".dat";
+		String categoryPath =prePath+"category_"+date+".dat";
+		applicationMap = getApplication(applicationPath);
+		assetMap = getAsset(assetPath);
+		businessMap = getBusiness(businessPath);
+		categoryMap = getCategory(categoryPath);
+	}
+	
+ 	public static void main(String[] args) throws Exception {
+ 		FileReader fr=new FileReader("C:/Users/Administrator/Desktop/11.txt");
+// 		FileReader fr=new FileReader("E:/ETL转换文档/河南数据转化说明/河南第三方data/playlog.2015-05-01");
+        BufferedReader br=new BufferedReader(fr);
+        String line="";
+        ETLMapper etl = new ETLMapper();
+        while ((line=br.readLine())!=null) {
+           String ss = etl.parserPlaylog(line);
+            System.out.println(ss);
+        }
+        br.close();
+        fr.close();
+	}
+}

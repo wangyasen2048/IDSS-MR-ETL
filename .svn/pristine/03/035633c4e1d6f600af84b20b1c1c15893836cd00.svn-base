@@ -1,0 +1,81 @@
+package com.cucrz.idss.hadoop.etl.mapreduce.rules;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapred.Counters.Counter;
+import org.apache.hadoop.mapreduce.Reducer.Context;
+import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
+import org.apache.log4j.Logger;
+
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.OtherConstants;
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.TypeConstans;
+import com.cucrz.idss.hadoop.etl.mapreduce.rules.ruleUtil.IETLRules;
+import com.cucrz.idss.hadoop.etl.mapreduce.rules.ruleUtil.RuleUtil;
+import com.cucrz.idss.hadoop.etl.util.DateUtil;
+
+public class LoseHeartBeat implements IETLRules{
+	static Map<String, String> conf = new HashMap<String, String>();
+	static Logger log = Logger.getLogger(AddOCEvent.class);
+	@Override
+	public Set<String> executeRule(String user,Set<String> records, Context context,MultipleOutputs<Text, Text> mos,Map<String, Map<String, String>> storage,
+			Map<String, Counter> counterMap) {
+		conf = RuleUtil.getConf(context);
+//		 Counter LoseHeartBeat=counterMap.get("LoseHeartBeat");
+		List<String> quene = new ArrayList<String>();
+//		List<String> HeartQuene = new ArrayList<String>();
+		Map<String, String> tmpMap = new HashMap<String, String>();
+		Iterator<String> it = records.iterator();
+		while (it.hasNext()) {
+			String line = it.next();
+			if (quene.size() < 2) {
+				if (RuleUtil.isAffectTime(line,2)) {
+					quene.add(line);
+				}
+			}
+			if (quene.size() == 2) {
+				String e1 = quene.get(0);
+				String e2 = quene.get(1);
+				String split1[] = e1.split(OtherConstants.VERTICAL_DELIM_REGEX);
+				String split2[] = e2.split(OtherConstants.VERTICAL_DELIM_REGEX);
+				String s1Time =  split1[0];
+				String s2Time =  split2[0];
+				String bizType1 = split1[2];
+				String bizType2 = split2[2];
+				if(bizType1.equals(TypeConstans.HEART_BEAT)){
+//					HeartQuene.add(e1);
+					
+					quene.remove(0);
+				}else{
+					if(bizType2.equals(TypeConstans.HEART_BEAT)){
+//						HeartQuene.add(e2);
+						quene.remove(1);					
+					}else{
+						if(!bizType1.equals(TypeConstans.OFF_CODE)&&!bizType1.equals(TypeConstans.LAST_OFF_CODE)){
+						String tmp=e1.substring(e1.indexOf(OtherConstants.VERTICAL_DELIM)+1);
+						int index=tmp.indexOf(OtherConstants.VERTICAL_DELIM)+1;
+						String newEvent=s1Time+OtherConstants.VERTICAL_DELIM+s2Time+OtherConstants.VERTICAL_DELIM+tmp.substring(index);
+						tmpMap.put(e1, newEvent);
+						}
+						quene.remove(0);
+					}
+				}				
+			}			
+		}
+//		for(String s:HeartQuene){
+//			records.remove(s);
+//			LoseHeartBeat.increment(1);
+//		}
+		Set<String> keys = tmpMap.keySet();
+		for (String s : keys) {
+			records.remove(s);
+			records.add(tmpMap.get(s));
+		}
+		return records;
+	}
+}

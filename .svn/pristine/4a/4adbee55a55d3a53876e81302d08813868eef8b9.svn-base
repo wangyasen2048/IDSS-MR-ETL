@@ -1,0 +1,183 @@
+package com.cucrz.idss.hadoop.etl.mapreduce.out.count;
+
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.net.URI;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
+import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+import java.util.Map.Entry;
+
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.mapreduce.Counter;
+import org.apache.hadoop.mapreduce.CounterGroup;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.Reducer.Context;
+import org.apache.log4j.Logger;
+import org.apache.log4j.chainsaw.Main;
+
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.OtherConstants;
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.TypeConstans;
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.TypeLackContants;
+import com.cucrz.idss.hadoop.etl.synchronizeBaseData.connect2Mysql;
+import com.cucrz.idss.hadoop.etl.synchronizeBaseData.bean.channelBean;
+import com.cucrz.idss.hadoop.etl.synchronizeBaseData.bean.video2cloumnBean;
+import com.cucrz.idss.hadoop.etl.synchronizeBaseData.channel.mysqlChannel;
+import com.cucrz.idss.hadoop.etl.synchronizeBaseData.vodInfo.mysqlVOD;
+import com.cucrz.idss.hadoop.etl.util.DateUtil;
+
+public class BusCount {
+
+	private static Logger log = Logger.getLogger(BusCount.class);
+
+	public static void busCount(Context context, String line) {
+		Map<String, Counter> map = new HashMap<String, Counter>();
+		String busCodes[] = line.split(OtherConstants.VERTICAL_DELIM_REGEX);
+		System.out.println(line);
+		 busCodes[2] = busCodes[2].equals("999999") ? "2" : busCodes[2];
+		String busLosecode = busCodes[2];
+		for (int i = 3; i < busCodes.length; i++) {
+			if (busCodes[i].equals("")) {
+				busLosecode = busLosecode + OtherConstants.VERTICAL_DELIM + (i - 2);
+			}
+		}
+		if (!busLosecode.equals(busCodes[2])) {
+			String blc[] = busLosecode.split(OtherConstants.VERTICAL_DELIM_REGEX);
+			TypeLackContants tlc = new TypeLackContants();
+			busLosecode = busCodes[2];
+			Class c = tlc.getClass();
+			try {
+				Field f = c.getField("_" + busLosecode);
+				Map<String, String> map1 = (Map<String, String>) f.get(tlc);
+				for (int i = 1; i < blc.length; i++) {
+					busLosecode = busLosecode + OtherConstants.VERTICAL_DELIM + "缺失："+blc[i]+"--"+ map1.get(blc[i]);
+				}
+				Counter busLoseCount = (Counter) context.getCounter("busLoseCounts", "业务代码：" + busLosecode);
+				busLoseCount.increment(1);
+			} catch (NoSuchFieldException e) {
+				e.printStackTrace();
+			} catch (SecurityException e) {
+				e.printStackTrace();
+			} catch (IllegalArgumentException e) {
+				e.printStackTrace();
+			} catch (IllegalAccessException e) {
+				e.printStackTrace();
+			}
+
+			return;
+		}
+		TypeConstans typeConstans = new TypeConstans();
+		Field fields[] = typeConstans.getClass().getDeclaredFields();
+		for (Field f : fields) {
+			if (f.getName().indexOf("default") < 0) {
+				try {
+					if (!f.get(typeConstans).equals("") && !f.get(typeConstans).equals("999999")) {
+						String busCodeCount = f.get(typeConstans).toString();
+						Counter busCount = (Counter) context.getCounter("busCounts", "业务代码：" + busCodeCount);
+						if (busCodes[2].equals(busCodeCount)) {
+							busCount.increment(1);
+						}
+					}
+				} catch (IllegalArgumentException e) {
+					e.printStackTrace();
+				} catch (IllegalAccessException e) {
+					e.printStackTrace();
+				}
+			}
+
+		}
+
+	}
+
+	public static Map<String, Map<String, Integer>> getCounter(Job job) {
+		Iterator it = null;
+		Map<String, Map<String, Integer>> maps = new HashMap<String, Map<String, Integer>>();
+		Map<String, Integer> map = null;
+		try {
+			it = job.getCounters().iterator();
+			while (it.hasNext()) {
+				map = new HashMap<String, Integer>();
+				CounterGroup cg = (CounterGroup) it.next();
+				Iterator<Counter> itc = cg.iterator();
+				while (itc.hasNext()) {
+					Counter c = (Counter) itc.next();
+					map.put(c.getName(), (int) c.getValue());
+				}
+				maps.put(cg.getDisplayName(), map);
+			}
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+
+		return maps;
+	}
+
+	public static void counterWriteToMysql(Map<String, Map<String, Integer>> map, Map<String, String> args) {
+
+		 connect2Mysql cm = connect2Mysql.getInstance();
+		 Connection conn = cm.getConnect(args);
+		 String update = "insert into dim_counter(counter_group_name,counter_name,count,time) VALUES (?,?,?,?)";
+		
+		 try {
+		 conn.setAutoCommit(false);
+		 PreparedStatement psUpdate = conn.prepareStatement(update);
+		 for (Entry<String, Map<String, Integer>> en : map.entrySet()) {
+		 for (Entry<String, Integer> e : en.getValue().entrySet()) {
+		 psUpdate.setString(1, en.getKey());
+		 psUpdate.setString(2, e.getKey());
+		 psUpdate.setInt(3, e.getValue());
+		 psUpdate.setString(4, DateUtil.getDateTimeStr(new Date()));
+		 psUpdate.execute();
+		 }
+		 }
+		 conn.commit();
+		 } catch (SQLException e) {
+		 log.warn("更新失败！错误的频道====" + e.toString());
+		 try {
+		 conn.rollback();
+		 } catch (SQLException e1) {
+		 log.warn("RollBack failed");
+		 }
+		 }
+		 try {
+		 conn.close();
+		 } catch (SQLException e) {
+		 log.warn("连接关闭异常！");
+		 e.printStackTrace();
+		 }
+		log.info("-----------数据库频道计数完成！-----------");
+
+	}
+
+	public static Map<String, String> synchromizeCounterInfoToHDFS(Configuration conf) {
+		Set<video2cloumnBean> video2cloumnSet = new HashSet<video2cloumnBean>();
+		Map<String, String> mysqlParameters = new HashMap<String, String>();
+		mysqlParameters.put("url", conf.get("idss_ETL_Mysql_url"));
+		mysqlParameters.put("username", conf.get("idss_ETL_Mysql_username"));
+		mysqlParameters.put("password", conf.get("idss_ETL_Mysql_password"));
+		return mysqlParameters;
+	}
+
+	public static void main(String[] args) throws NoSuchFieldException, SecurityException, IllegalArgumentException, IllegalAccessException, InvocationTargetException, NoSuchMethodException {
+		TypeLackContants tlc = new TypeLackContants();
+		String busLosecode = "771";
+		Class c = tlc.getClass();
+
+		Field f = c.getField("_" + busLosecode);
+		Map<String,String> map1=  (Map<String, String>) f.get(tlc);
+		
+		System.out.println(map1.get("7"));
+
+	}
+}

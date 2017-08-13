@@ -1,0 +1,271 @@
+package com.cucrz.idss.hadoop.etl.mapreduce.job;
+
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.lang.time.DateFormatUtils;
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.filecache.DistributedCache;
+import org.apache.hadoop.fs.FileStatus;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapreduce.Job;
+import org.apache.hadoop.mapreduce.lib.input.MultipleInputs;
+import org.apache.hadoop.mapreduce.lib.jobcontrol.ControlledJob;
+import org.apache.hadoop.mapreduce.lib.output.FileOutputFormat;
+import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
+import org.apache.hadoop.mapreduce.lib.output.TextOutputFormat;
+import org.apache.log4j.Logger;
+
+import com.cucrz.idss.hadoop.etl.exception.IdsshvException;
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.OtherConstants;
+import com.cucrz.idss.hadoop.etl.mapreduce.constants.OutputPath;
+import com.cucrz.idss.hadoop.etl.mapreduce.in.ETLInputFormat;
+import com.cucrz.idss.hadoop.etl.mapreduce.in.path.OperatorPath;
+import com.cucrz.idss.hadoop.etl.synchronizeBaseData.channel.synchronizeChannel;
+import com.cucrz.idss.hadoop.etl.synchronizeBaseData.vodInfo.synchronizeVOD;
+import com.cucrz.idss.hadoop.etl.util.DateUtil;
+import com.cucrz.idss.hadoop.etl.util.ReadProperty;
+
+/**
+ * 
+ * @author 魏强
+ * 
+ * @createtime 2015年3月5日
+ */
+public class DataEtlJob extends ControlledJob {
+	// private static final String ETL_TYPE_JOB_CONF = "etlTypeJob.conf.xml";
+	private static Logger log = Logger.getLogger(DataEtlJob.class);
+	private static boolean isSampleFileExits = false;
+	private static final String JOB_PROPERTY = "/cucrz/data/cache/";
+	private static final String propertyFileName = "idss_etl.property";
+	private static final String JarsPath="/user/oozie/rzcloud/lib/";
+	/**
+	 * 
+	 * @param conf
+	 * @throws IOException
+	 */
+	public DataEtlJob(Configuration conf, String[] args) throws IOException {
+		super(conf);
+		try {
+			super.setJob(createJob(conf));
+		} catch (IdsshvException e) {
+			log.warn("job创建失败！");
+		} catch (URISyntaxException e) {
+			e.printStackTrace();
+		}
+	}
+
+	@SuppressWarnings("deprecation")
+	public static Job createJob(Configuration conf) throws IOException,
+			IdsshvException, URISyntaxException {
+		FileSystem fs = FileSystem.get(conf);
+		Job job = new Job(conf, "etlDataEtlJob_"
+				+ conf.get("operatorID")
+				+ "_"
+				+ conf.get("inputDateID").replace(
+						OtherConstants.FILE_SEPARATOR, "")
+				+ "_"
+				+ DateFormatUtils.format(System.currentTimeMillis(),
+						"yyyyMMddHHmmssSSS"));
+		addDistributedJars(fs, conf, job);
+		boolean isOpen = Boolean.parseBoolean(conf.get("dcOpen"));
+		String sampleFile = conf.get("idss_ETL_Cache_SampleListFilePath");
+		String isOutputSampleUser = conf.get("idss_ETL_Rule_SampleUser");
+		if (isOpen) {
+			// 添加distributedcache
+			FileStatus[] files = fs.listStatus(new Path(conf
+					.get("preCachePath")
+					+ conf.get("operatorID")
+					+ OtherConstants.FILE_SEPARATOR));
+			for (int i = 0; i < files.length; i++) {
+				if (!files[i].isDir()) {
+					String path = files[i].getPath().toString();
+					int idx = path.lastIndexOf(OtherConstants.FILE_SEPARATOR);
+					String symlink = path.substring(idx + 1);
+
+					DistributedCache.addCacheFile(
+							new URI(path + "#" + symlink),
+							job.getConfiguration());
+					if (sampleFile!=null&&sampleFile.equals(symlink)) {
+						isSampleFileExits = true;
+					}
+				}
+			}
+
+			if (isOutputSampleUser.equals("true") && isSampleFileExits == false) {
+				System.out
+						.println("--------------------样本户列表文件不存在，程序退出-------------------------");
+				return null;
+			}
+			
+			DistributedCache.createSymlink(conf);
+		} else {
+			if (isOutputSampleUser.equals("true")) {
+				System.out
+						.println("-------------------分布式缓存已关闭，无法输出样本户，请检查配置------------------------");
+				return null;
+			}
+		}
+
+		job.setJarByClass(DataEtlJob.class);
+		job.setMapperClass(DataETLMapper.class);
+		job.setReducerClass(DataETLReducer.class);
+		job.setOutputKeyClass(Text.class);
+		job.setOutputValueClass(Text.class);
+		job.setInputFormatClass(ETLInputFormat.class);
+		String isSelfPath = "false";
+		isSelfPath = conf.get("idss_ETL_Path_Self");
+		if (isSelfPath == null || !isSelfPath.equals("true")) {
+			Path in = new Path(conf.get("fs.defaultFS")
+					+ OtherConstants.FILE_SEPARATOR
+					+ conf.get("dataSourcePath")
+					+ OtherConstants.FILE_SEPARATOR + conf.get("operatorID")
+					+ OtherConstants.FILE_SEPARATOR + conf.get("inputDateID"));
+//			Path in = new Path("hdfs://192.168.20.21"
+//					+ OtherConstants.FILE_SEPARATOR
+//					+ conf.get("dataSourcePath")
+//					+ OtherConstants.FILE_SEPARATOR + conf.get("operatorID")
+//					+ OtherConstants.FILE_SEPARATOR + conf.get("inputDateID"));
+//			FileInputFormat.addInputPath(job,in);
+			FileStatus[] files = fs.listStatus(in);
+			for (int i = 0; i < files.length; i++) {
+				if (!files[i].isDir()) {
+					MultipleInputs.addInputPath(job, files[i].getPath(),
+							ETLInputFormat.class);
+				}
+			}
+		} else {
+			String operatorName = conf.get("pathName");
+			Path[] paths = OperatorPath.getPath(operatorName,
+					conf.get("operatorID"), conf.get("inputDateID"));
+			for (Path p : paths) {
+				FileStatus[] files = fs.listStatus(new Path(conf
+						.get("fs.defaultFS")
+						+ OtherConstants.FILE_SEPARATOR
+						+ p.toString()));
+//				 p = new Path("hdfs://192.168.20.21"
+//						+ OtherConstants.FILE_SEPARATOR
+//						+ p.toString());
+				for (int i = 0; i < files.length; i++) {
+					if (!files[i].isDir()) {
+						MultipleInputs.addInputPath(job, files[i].getPath(),
+								ETLInputFormat.class);
+					}
+				}
+//				FileInputFormat.addInputPath(job, p);
+			}
+		}
+		Path out = new Path(conf.get("outputPath")
+				+ OtherConstants.FILE_SEPARATOR
+				+ conf.get("operatorID")
+				+ OtherConstants.FILE_SEPARATOR
+				+ conf.get("inputDateID"));
+		if (fs.exists(out)) {
+			fs.delete(out, true);
+		}
+		FileOutputFormat.setOutputPath(job, out);
+		// 定义附加的输出文件
+		MultipleOutputs.addNamedOutput(job, OutputPath.LAST_EVENT,
+				TextOutputFormat.class, Text.class, Text.class);
+		MultipleOutputs.addNamedOutput(job, OutputPath.WRONG,
+				TextOutputFormat.class, Text.class, Text.class);
+		MultipleOutputs.addNamedOutput(job, OutputPath.WHOLE,
+				TextOutputFormat.class, Text.class, Text.class);
+		MultipleOutputs.addNamedOutput(job, OutputPath.SAMPLE,
+				TextOutputFormat.class, Text.class, Text.class);
+		MultipleOutputs.addNamedOutput(job, OutputPath.NEW_CHANNLE,
+				TextOutputFormat.class, Text.class, Text.class);
+		MultipleOutputs.addNamedOutput(job, OutputPath.NEW_USER,
+				TextOutputFormat.class, Text.class, Text.class);
+		MultipleOutputs.addNamedOutput(job, OutputPath.NEWCLOUMN,
+				TextOutputFormat.class, Text.class, Text.class);
+		return job;
+	}
+
+	public static boolean run(Map<String, String> mapArgs) throws Exception {
+		Configuration conf = new Configuration();
+		String propertyPath=conf.get("fs.defaultFS")+
+				JOB_PROPERTY + mapArgs.get("operatorID") + File.separator
+				+ propertyFileName;
+		mapArgs.putAll(ReadProperty.readProperty(propertyPath, conf));
+		conf.set("dcOpen", mapArgs.get("dcOpen"));
+		Set<String> set = mapArgs.keySet();
+		for (String key : set) {
+			conf.set(key, mapArgs.get(key));
+		}
+		conf.set("outputPath", mapArgs.get("prefixOutputPath"));
+		conf.set("dataSourcePath", mapArgs.get("prefixDataPath"));
+		conf.set("mapred.reduce.tasks", "5");
+		String beforeDate=DateUtil.getPreDate(conf.get("inputDateID"),DateUtil.DATEFORMATER);
+		String lastEvent=conf.get("fs.defaultFS")
+				+ conf.get("outputPath")
+				+ OtherConstants.FILE_SEPARATOR
+				+ conf.get("operatorID")
+				+ OtherConstants.FILE_SEPARATOR
+				+beforeDate +OtherConstants.FILE_SEPARATOR+"lastEvent"+OtherConstants.FILE_SEPARATOR;
+//		String lastEvent="hdfs://192.168.20.21"
+//				+ conf.get("outputPath")
+//				+ OtherConstants.FILE_SEPARATOR
+//				+ conf.get("operatorID")
+//				+ OtherConstants.FILE_SEPARATOR
+//				+beforeDate +OtherConstants.FILE_SEPARATOR;
+		conf.set("lastEventPath",lastEvent );
+		Job job = null;
+		String baseData=conf.get("idss_ETL_Rule_BaseData");
+		try {
+			job = createJob(conf);//创建job
+			if(baseData!=null&&baseData.equals("true")){
+			synchronizeChannel.synchromizeChannelToHDFS(conf);//从mysql同步频道到HDFS
+			synchronizeVOD.synchromizeVODInfoToHDFS(conf);//从mysql同步VOD信息到HDFS
+			}
+			job.submit();//提交job
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		boolean isFinished = job.waitForCompletion(true);
+//		boolean isFinished =true;
+		if (isFinished) {
+			if(baseData!=null&&baseData.equals("true")){
+			synchronizeChannel.synchronizeChannelToMysql(conf);//从HDFS同步频道到mysql
+			synchronizeVOD.synchronizeVODInfoToMysql(conf);//从HDFS同步VOD到mysql
+			}
+			System.out.println("==========》 日期id为 "
+					+ mapArgs.get("inputDateID")
+					+ "----Etl处理成功！《==========");
+			return true;
+		} else {
+			System.out.println("==========》 日期id为 "
+					+ mapArgs.get("inputDateID")
+					+ "----Etl处理失败！《==========");
+			return false;
+		}
+	}
+	public static void addDistributedJars(FileSystem fs,Configuration conf,Job job) throws FileNotFoundException, IllegalArgumentException, IOException, URISyntaxException{
+		if(fs.exists(new Path(JarsPath))){
+		FileStatus[] files = fs.listStatus(new Path(JarsPath));
+		for (int i = 0; i < files.length; i++) {
+			if (!files[i].isDir()) {
+				String path = files[i].getPath().toString();
+				int idx = path.lastIndexOf(OtherConstants.FILE_SEPARATOR);
+				String symlink = path.substring(idx + 1);
+				if(symlink.startsWith("IDSS-MR-ETL")&&symlink.endsWith(".jar")){
+					log.info("加载第三方jars===="+symlink);
+				DistributedCache.addCacheFile(
+						new URI(path + "#" + symlink),
+						job.getConfiguration());
+				 DistributedCache.addArchiveToClassPath(new Path(path + "#" + symlink), conf);
+				}
+			}
+		}
+		}else{
+			throw new IOException("转换类jar不存在！！");
+		}
+	}
+}

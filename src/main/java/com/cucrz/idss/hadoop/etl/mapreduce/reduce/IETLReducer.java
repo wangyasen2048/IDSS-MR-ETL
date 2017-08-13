@@ -1,0 +1,20 @@
+package com.cucrz.idss.hadoop.etl.mapreduce.reduce;
+
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.hadoop.io.Text;
+import org.apache.hadoop.mapred.Counters.Counter;
+import org.apache.hadoop.mapreduce.Reducer.Context;
+import org.apache.hadoop.mapreduce.lib.output.MultipleOutputs;
+
+public interface IETLReducer {
+	
+	Map<String, Map<String, String>> etlReduceSetupDisCache(Context context, Map<String, Map<String, String>> storage);
+	
+	Map<String, Counter> etlRedSetupGetCounter(Context context);
+
+	void etlReducer(String key, Set<String> records, Context context, MultipleOutputs<Text, Text> mos,
+			String inputDateID, Map<String, Counter> counterMap);
+
+}

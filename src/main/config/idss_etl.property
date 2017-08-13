@@ -1,0 +1,43 @@
+##mysql parameter
+idss_ETL_Mysql_url=jdbc:mysql://192.168.20.208:3306/idsscs_datamart_sx
+idss_ETL_Mysql_username=root
+idss_ETL_Mysql_password=test
+##user conf
+idss_ETL_Path_Self=false
+#idss_ETL_File_Separator=<?>
+idss_ETL_VODInfoList_Separator=,
+prefixDataPath=cucrz/data
+prefixOutputPath=/cucrz/output/all
+preCachePath=/cucrz/data/cache/
+preJarPath=/user/oozie/test/lib/
+##CacheFileName
+idss_ETL_Cache_SampleListFilePath=sampleUser.txt
+idss_ETL_Cache_NameToUniqueChannel=col.txt
+idss_ETL_Cache_OriginalChannelToUniqueChannel=ods.txt
+idss_ETL_Cache_UniqueRegionList=region.txt
+idss_ETL_Cache_UserListFilePath=userList.txt
+idss_ETL_Cache_VODInfoList=vodInfo.txt
+idss_ETL_Cache_LookBackList=lookback.txt
+idss_ETL_Cache_TVApp=tvapp.txt
+##rule conf
+idss_ETL_Rule_MergeSameEvent=true
+idss_ETL_Rule_OC=true
+idss_ETL_Rule_LoseHeartBeat=true
+idss_ETL_Rule_NoChannel=true
+idss_ETL_Rule_SampleUser=false
+idss_ETL_Rule_BaseData=true
+idss_ETL_Rule_FindNewBaseData=false
+##output conf
+idss_ETL_NewUserList=true
+idss_ETL_NewChannel=true
+idss_ETL_NewCloumn=true
+idss_ETL_Form_Hive=true
+idss_ETL_Form_Event1=true
+idss_ETL_Form_Event2=true
+idss_ETL_Form_Source=true
+##timeParameter conf
+idss_ETL_POWER_ONOFF_INTERVAL_TIME=18000
+idss_ETL_POWER_OFF_POSTPONED_TIME=9000
+idss_ETL_POWER_ON_SUB_TIME=15
+idss_ETL_NOCHANNEL_INTERVAL_TIME=5
+idss_ETL_SAME_EVENT_MERGE_TIME=900

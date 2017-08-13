@@ -1,0 +1,133 @@
+package com.cucrz.idss.hadoop.etl.synchronizeBaseData.channel;
+
+import java.sql.CallableStatement;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.text.ParseException;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import org.apache.commons.lang.StringEscapeUtils;
+import org.apache.log4j.Logger;
+import com.cucrz.idss.hadoop.etl.synchronizeBaseData.connect2Mysql;
+import com.cucrz.idss.hadoop.etl.synchronizeBaseData.bean.channelBean;
+import com.cucrz.idss.hadoop.etl.synchronizeBaseData.vodInfo.mysqlVOD;
+import com.cucrz.idss.hadoop.etl.util.DateUtil;
+
+public class mysqlChannel {
+	private static Connection conn = null;
+	private static connect2Mysql instance = null;
+	private static Logger log = Logger.getLogger(mysqlChannel.class);
+
+	public static Set<channelBean> getChannelFromMysql(String region,
+			Map<String, String> args, String operatorID, String inputDate) {
+		instance = connect2Mysql.getInstance();
+		conn = instance.getConnect(args);
+		String sql = "select distinct(channel_code),"
+				+ "channel_name," + "netoperator_id," + "service_id,"
+				+ "ts_id," + "net_id," + "create_time," + "modified_time "
+				+ "from t_operator_channel where netoperator_id='"
+				+ StringEscapeUtils.escapeSql(operatorID)+"'";
+		try {
+			conn.setAutoCommit(false);
+			PreparedStatement ps = conn.prepareStatement(sql);
+			ResultSet result = ps.executeQuery(sql);
+			Set<channelBean> channelSet = new HashSet<channelBean>();
+			while (result.next()) {
+				String channel_code = mysqlVOD.getNotNullValue(result
+						.getString(1));
+				String region_channelname = mysqlVOD.getNotNullValue(result
+						.getString(2));
+				String netoperator_id = mysqlVOD.getNotNullValue(result
+						.getString(3));
+				String service_id = mysqlVOD.getNotNullValue(result
+						.getString(4));
+				String ts_id = mysqlVOD.getNotNullValue(result.getString(5));
+				String net_id = mysqlVOD.getNotNullValue(result.getString(6));
+				String create_time = mysqlVOD.getNotNullValue(result
+						.getString(7));
+				String modified_time = mysqlVOD.getNotNullValue(result
+						.getString(8));
+				channelBean channel = new channelBean(channel_code,
+						region_channelname, netoperator_id, service_id, ts_id,
+						net_id, create_time, modified_time);
+				channelSet.add(channel);
+			}
+			return channelSet;
+		} catch (SQLException e) {
+			log.warn("查询频道异常！");
+			e.printStackTrace();
+			return null;
+		}finally{
+			try {
+				conn.close();
+			} catch (SQLException e) {
+				log.warn("连接关闭异常！");
+				e.printStackTrace();
+			}
+		}
+	}
+
+	public static void updateChannelToMysql(Set<channelBean> channelSet,
+			String region, Map<String, String> args) {
+		instance = connect2Mysql.getInstance();
+		conn = instance.getConnect(args);
+		String operID = args.get("operID");
+		String call="{call basedata(?)}";
+		
+		String update="insert into  t_operator_channel  VALUES(?,?,?,?,?,?,?,?,?,default)"
+				+ "ON DUPLICATE KEY UPDATE modified_time=?";
+				for (channelBean c : channelSet) {
+					try {
+						conn.setAutoCommit(false);
+					PreparedStatement psUpdate = conn.prepareStatement(update);
+					psUpdate.setString(1, c.getChannel_code());
+					psUpdate.setString(2, c.getRegion_channelname());
+					psUpdate.setString(3, c.getNetoperator_id());
+					psUpdate.setString(4, c.getService_id());
+					psUpdate.setString(5, c.getTs_id());
+					psUpdate.setString(6, c.getNet_id());
+					psUpdate.setString(7, c.getCreate_time());
+					psUpdate.setString(8, c.getModified_time());
+					psUpdate.setString(9, operID+"0000");
+					psUpdate.setString(10, c.getModified_time());
+					psUpdate.execute();
+					conn.commit();
+			} catch (SQLException e) {
+				log.warn("更新失败！错误的频道===="+c.toString());
+				try {
+					conn.rollback();
+				} catch (SQLException e1) {
+					log.warn("RollBack failed");
+				}
+			}
+			}
+				try {
+					conn.setAutoCommit(false);
+					CallableStatement pscall = conn.prepareCall(call);
+					pscall.setString(1, operID);
+					boolean r=pscall.execute();
+					conn.commit();
+					log.info("执行"+operID+"的频道同步存储过程成功！"+r);
+				} catch (SQLException e2) {
+					e2.printStackTrace();	
+					try {
+						conn.rollback();
+						log.warn("执行"+operID+"的频道同步存储过程失败！");
+					} catch (SQLException e) {
+						e.printStackTrace();
+					}
+				}
+			try {
+				conn.close();
+			} catch (SQLException e) {
+				log.warn("连接关闭异常！");
+				e.printStackTrace();
+			}
+		log.info("-----------数据库同步频道完成！-----------");
+	}
+}
